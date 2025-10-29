@@ -1,9 +1,9 @@
+// server.js
 const express = require("express");
 const sqlite3 = require("sqlite3").verbose();
 const session = require("express-session");
 const bcrypt = require("bcryptjs");
-const cors = require("cors");
-const path = require("path");
+const cors = require("cors"); // 동일 출처(예: frontend가 same origin)라면 불필요
 const SQLiteStore = require("connect-sqlite3")(session);
 
 const app = express();
@@ -44,26 +44,23 @@ db.serialize(() => {
 // 미들웨어 설정
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(
-  cors({
-    origin: "http://localhost:3001", // 프론트엔드 주소 (필요에 따라 변경)
-    credentials: true,
-  })
-);
 
-// 세션 설정
+// 만약 프론트가 다른 포트/도메인에서 동작하면 cors를 켜고 origin을 설정하세요.
+const corsOptions = { origin: "http://localhost:5173", credentials: true };
+app.use(cors(corsOptions));
+
+// 세션 설정 (SQLiteStore 사용)
 app.use(
   session({
     store: new SQLiteStore({
       db: "sessions.db",
       dir: "./",
     }),
-    secret:
-      process.env.SESSION_SECRET || "your-secret-key-change-in-production",
+    secret: process.env.SESSION_SECRET || "your-secret-key-change-in-production",
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false, // HTTPS 환경에서는 true로 설정
+      secure: false, // HTTPS 환경에서는 true로 변경
       httpOnly: true,
       maxAge: 24 * 60 * 60 * 1000, // 24시간
     },
@@ -81,14 +78,10 @@ const requireAuth = (req, res, next) => {
 // 사용자 정보를 가져오는 헬퍼 함수
 const getUserById = (id) => {
   return new Promise((resolve, reject) => {
-    db.get(
-      "SELECT id, username, email FROM users WHERE id = ?",
-      [id],
-      (err, row) => {
-        if (err) reject(err);
-        else resolve(row);
-      }
-    );
+    db.get("SELECT id, username, email FROM users WHERE id = ?", [id], (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
   });
 };
 
@@ -103,9 +96,7 @@ app.post("/api/auth/register", async (req, res) => {
   }
 
   if (password.length < 6) {
-    return res
-      .status(400)
-      .json({ error: "비밀번호는 최소 6자 이상이어야 합니다." });
+    return res.status(400).json({ error: "비밀번호는 최소 6자 이상이어야 합니다." });
   }
 
   try {
@@ -117,9 +108,7 @@ app.post("/api/auth/register", async (req, res) => {
       function (err) {
         if (err) {
           if (err.message.includes("UNIQUE constraint failed")) {
-            return res
-              .status(409)
-              .json({ error: "이미 존재하는 사용자명 또는 이메일입니다." });
+            return res.status(409).json({ error: "이미 존재하는 사용자명 또는 이메일입니다." });
           }
           return res.status(500).json({ error: "서버 오류가 발생했습니다." });
         }
@@ -149,17 +138,13 @@ app.post("/api/auth/login", (req, res) => {
     }
 
     if (!user) {
-      return res
-        .status(401)
-        .json({ error: "잘못된 이메일 또는 비밀번호입니다." });
+      return res.status(401).json({ error: "잘못된 이메일 또는 비밀번호입니다." });
     }
 
     try {
       const isValidPassword = await bcrypt.compare(password, user.password);
       if (!isValidPassword) {
-        return res
-          .status(401)
-          .json({ error: "잘못된 이메일 또는 비밀번호입니다." });
+        return res.status(401).json({ error: "잘못된 이메일 또는 비밀번호입니다." });
       }
 
       req.session.userId = user.id;
@@ -181,9 +166,7 @@ app.post("/api/auth/login", (req, res) => {
 app.post("/api/auth/logout", (req, res) => {
   req.session.destroy((err) => {
     if (err) {
-      return res
-        .status(500)
-        .json({ error: "로그아웃 중 오류가 발생했습니다." });
+      return res.status(500).json({ error: "로그아웃 중 오류가 발생했습니다." });
     }
     res.clearCookie("connect.sid");
     res.json({ message: "로그아웃되었습니다." });
@@ -203,44 +186,69 @@ app.get("/api/auth/me", requireAuth, async (req, res) => {
   }
 });
 
-// 5. 글 목록 조회
+// 5. 글 목록 조회 (응답 형태를 상세와 일치시킴; 다만 content는 요약하여 반환)
 app.get("/api/posts", (req, res) => {
   const query = `
-    SELECT p.*, u.username as author_username 
-    FROM posts p 
-    JOIN users u ON p.author_id = u.id 
+    SELECT p.id, p.title, p.author_id, p.created_at,
+           u.username as author_username
+    FROM posts p
+    JOIN users u ON p.author_id = u.id
     ORDER BY p.created_at DESC
   `;
 
-  db.all(query, [], (err, posts) => {
+  db.all(query, [], (err, rows) => {
     if (err) {
       return res.status(500).json({ error: "서버 오류가 발생했습니다." });
     }
+
+    // 목록에서는 content를 요약(excerpt)하도록 설정 (예: 200자)
+    const excerptLength = 200;
+    const posts = rows.map((r) => ({
+      id: r.id,
+      title: r.title,
+      author: {
+        id: r.author_id,
+        username: r.author_username || null,
+      },
+      created_at: r.created_at
+    }));
 
     res.json({ posts });
   });
 });
 
-// 6. 글 상세 조회
+// 6. 글 상세 조회 (목록과 동일한 키 구조, content는 전체)
 app.get("/api/posts/:id", (req, res) => {
   const postId = req.params.id;
 
   const query = `
-    SELECT p.*, u.username as author_username 
-    FROM posts p 
-    JOIN users u ON p.author_id = u.id 
+    SELECT p.id, p.title, p.content, p.author_id, p.created_at, p.updated_at,
+           u.username as author_username
+    FROM posts p
+    JOIN users u ON p.author_id = u.id
     WHERE p.id = ?
   `;
 
-  db.get(query, [postId], (err, post) => {
+  db.get(query, [postId], (err, row) => {
     if (err) {
       return res.status(500).json({ error: "서버 오류가 발생했습니다." });
     }
 
-    if (!post) {
+    if (!row) {
       return res.status(404).json({ error: "게시글을 찾을 수 없습니다." });
     }
 
+    const post = {
+      id: row.id,
+      title: row.title,
+      content: row.content,
+      author: {
+        id: row.author_id,
+        username: row.author_username || null,
+      },
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
     res.json({ post });
   });
 });
@@ -340,7 +348,7 @@ app.delete("/api/posts/:id", requireAuth, (req, res) => {
 });
 
 // 헬스 체크
-app.get("/api/health", (req, res) => {
+app.get("/health", (req, res) => {
   res.json({ status: "OK", message: "Server is running" });
 });
 
@@ -358,17 +366,4 @@ app.use((err, req, res, next) => {
 // 서버 시작
 app.listen(PORT, () => {
   console.log(`서버가 http://localhost:${PORT}에서 실행 중입니다.`);
-});
-
-// 깔끔한 종료를 위한 이벤트 리스너
-process.on("SIGINT", () => {
-  console.log("서버를 종료합니다...");
-  db.close((err) => {
-    if (err) {
-      console.error("데이터베이스 연결 종료 오류:", err.message);
-    } else {
-      console.log("데이터베이스 연결이 종료되었습니다.");
-    }
-  });
-  process.exit(0);
 });
